@@ -126,6 +126,11 @@ def format_duration(start_time, end_time):
 # SEND LOG TO TELEGRAM
 # ============================================================
 
+# Stores only the latest VC JOINED / VC LEFT log message ID.
+# This is intentionally separate from VC STARTED / VC ENDED / ONLINE logs.
+last_vc_event_message_id = None
+
+
 def send_log(message):
 
     url = (
@@ -154,6 +159,18 @@ def send_log(message):
                 "❌ Bot API error:",
                 response.text
             )
+            return None
+
+        result = response.json()
+
+        if not result.get("ok"):
+            print(
+                "❌ Telegram could not send log:",
+                result
+            )
+            return None
+
+        return result["result"]["message_id"]
 
     except Exception as e:
 
@@ -161,6 +178,63 @@ def send_log(message):
             "❌ Failed to send log:",
             e
         )
+        return None
+
+
+def send_vc_event_log(message):
+    """
+    Delete the previous JOINED/LEFT notification, then send the new one.
+    VC STARTED, VC ENDED and LOGGER ONLINE messages are not affected.
+    """
+
+    global last_vc_event_message_id
+
+    if last_vc_event_message_id is not None:
+
+        delete_url = (
+            f"https://api.telegram.org/"
+            f"bot{BOT_TOKEN}/deleteMessage"
+        )
+
+        delete_data = {
+            "chat_id": LOG_CHAT_ID,
+            "message_id": last_vc_event_message_id,
+        }
+
+        try:
+
+            response = requests.post(
+                delete_url,
+                data=delete_data,
+                timeout=15
+            )
+
+            result = response.json()
+
+            if response.status_code != 200 or not result.get("ok"):
+                print(
+                    "⚠️ Could not delete previous VC event log:",
+                    result
+                )
+            else:
+                print(
+                    f"🗑️ Deleted previous VC event log: "
+                    f"{last_vc_event_message_id}"
+                )
+
+        except Exception as e:
+
+            print(
+                "⚠️ Failed to delete previous VC event log:",
+                e
+            )
+
+    # Send the new JOINED / LEFT notification and remember its message ID.
+    last_vc_event_message_id = None
+    new_message_id = send_log(message)
+
+    if new_message_id is not None:
+        last_vc_event_message_id = new_message_id
 
 
 # ============================================================
@@ -472,7 +546,7 @@ async def register_join(
         f"{html.escape(chat_title)}"
     )
 
-    send_log(message)
+    send_vc_event_log(message)
 
     print(
         f"🟢 JOIN | "
@@ -553,7 +627,7 @@ async def register_leave(
         f"{html.escape(chat_title)}"
     )
 
-    send_log(message)
+    send_vc_event_log(message)
 
     print(
         f"🔴 LEFT | "
