@@ -1,4 +1,3 @@
-```python
 import os
 import json
 import asyncio
@@ -1084,4 +1083,4 @@ if __name__ == "__main__":
         print(
             f"\nFatal error: {e}"
         )
-```
+
