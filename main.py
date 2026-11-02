@@ -1,9 +1,12 @@
+```python
 import os
+import json
 import asyncio
 import html
-from datetime import datetime
-
 import requests
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from telethon import TelegramClient, events, functions
@@ -24,34 +27,40 @@ SESSION_STRING = os.getenv("SESSION_STRING")
 MONITORED_CHAT_ID = os.getenv("MONITORED_CHAT_ID")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 LOG_CHAT_ID = os.getenv("LOG_CHAT_ID")
+OWNER_ID = os.getenv("OWNER_ID")
 
 
 # ============================================================
 # CHECK ENVIRONMENT VARIABLES
 # ============================================================
 
-if not API_ID:
-    raise ValueError("❌ API_ID is missing")
+required_variables = {
+    "API_ID": API_ID,
+    "API_HASH": API_HASH,
+    "SESSION_STRING": SESSION_STRING,
+    "MONITORED_CHAT_ID": MONITORED_CHAT_ID,
+    "BOT_TOKEN": BOT_TOKEN,
+    "LOG_CHAT_ID": LOG_CHAT_ID,
+    "OWNER_ID": OWNER_ID,
+}
 
-if not API_HASH:
-    raise ValueError("❌ API_HASH is missing")
+for variable, value in required_variables.items():
 
-if not SESSION_STRING:
-    raise ValueError("❌ SESSION_STRING is missing")
-
-if not MONITORED_CHAT_ID:
-    raise ValueError("❌ MONITORED_CHAT_ID is missing")
-
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN is missing")
-
-if not LOG_CHAT_ID:
-    raise ValueError("❌ LOG_CHAT_ID is missing")
+    if not value:
+        raise ValueError(f"Missing environment variable: {variable}")
 
 
 API_ID = int(API_ID)
 MONITORED_CHAT_ID = int(MONITORED_CHAT_ID)
 LOG_CHAT_ID = int(LOG_CHAT_ID)
+OWNER_ID = int(OWNER_ID)
+
+
+# ============================================================
+# TIMEZONE CONFIGURATION
+# ============================================================
+
+IST = ZoneInfo("Asia/Kolkata")
 
 
 # ============================================================
@@ -74,24 +83,31 @@ chat_title = "YOU AND ME"
 
 current_call_id = None
 
-# Currently tracked VC users
 active_users = {}
 
-# Cached Telegram users
 user_cache = {}
+
+last_vc_event_message_id = None
 
 
 # ============================================================
-# TIME FUNCTIONS
+# TIME FUNCTIONS (INDIAN STANDARD TIME)
 # ============================================================
 
 def now():
-    return datetime.now()
+
+    return datetime.now(IST)
 
 
 def format_time(dt):
+
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=IST)
+
+    dt = dt.astimezone(IST)
+
     return dt.strftime(
-        "%d-%m-%Y %I:%M:%S %p"
+        "%d-%m-%Y %I:%M:%S %p IST"
     )
 
 
@@ -123,15 +139,28 @@ def format_duration(start_time, end_time):
 
 
 # ============================================================
+# OWNER INLINE BUTTON
+# ============================================================
+
+def owner_button():
+
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "👑 OWNER PROFILE",
+                    "url": f"tg://user?id={OWNER_ID}"
+                }
+            ]
+        ]
+    }
+
+
+# ============================================================
 # SEND LOG TO TELEGRAM
 # ============================================================
 
-# Stores only the latest VC JOINED / VC LEFT log message ID.
-# This is intentionally separate from VC STARTED / VC ENDED / ONLINE logs.
-last_vc_event_message_id = None
-
-
-def send_log(message):
+def send_log(message, reply_markup=None):
 
     url = (
         f"https://api.telegram.org/"
@@ -145,6 +174,12 @@ def send_log(message):
         "disable_web_page_preview": True,
     }
 
+    if reply_markup:
+
+        data["reply_markup"] = json.dumps(
+            reply_markup
+        )
+
     try:
 
         response = requests.post(
@@ -156,18 +191,21 @@ def send_log(message):
         if response.status_code != 200:
 
             print(
-                "❌ Bot API error:",
+                "Bot API error:",
                 response.text
             )
+
             return None
 
         result = response.json()
 
         if not result.get("ok"):
+
             print(
-                "❌ Telegram could not send log:",
+                "Telegram could not send log:",
                 result
             )
+
             return None
 
         return result["result"]["message_id"]
@@ -175,19 +213,22 @@ def send_log(message):
     except Exception as e:
 
         print(
-            "❌ Failed to send log:",
+            "Failed to send log:",
             e
         )
+
         return None
 
 
+# ============================================================
+# DELETE PREVIOUS VC EVENT AND SEND NEW LOG
+# ============================================================
+
 def send_vc_event_log(message):
-    """
-    Delete the previous JOINED/LEFT notification, then send the new one.
-    VC STARTED, VC ENDED and LOGGER ONLINE messages are not affected.
-    """
 
     global last_vc_event_message_id
+
+    # Delete previous JOINED / LEFT notification
 
     if last_vc_event_message_id is not None:
 
@@ -211,34 +252,43 @@ def send_vc_event_log(message):
 
             result = response.json()
 
-            if response.status_code != 200 or not result.get("ok"):
+            if not result.get("ok"):
+
                 print(
-                    "⚠️ Could not delete previous VC event log:",
+                    "Could not delete previous VC log:",
                     result
                 )
+
             else:
+
                 print(
-                    f"🗑️ Deleted previous VC event log: "
+                    f"Deleted previous VC log: "
                     f"{last_vc_event_message_id}"
                 )
 
         except Exception as e:
 
             print(
-                "⚠️ Failed to delete previous VC event log:",
+                "Failed to delete previous VC log:",
                 e
             )
 
-    # Send the new JOINED / LEFT notification and remember its message ID.
+    # Send new VC event with OWNER PROFILE button
+
     last_vc_event_message_id = None
-    new_message_id = send_log(message)
+
+    new_message_id = send_log(
+        message,
+        reply_markup=owner_button()
+    )
 
     if new_message_id is not None:
+
         last_vc_event_message_id = new_message_id
 
 
 # ============================================================
-# USER NAME
+# USER DISPLAY NAME
 # ============================================================
 
 def get_display_name(user):
@@ -247,20 +297,12 @@ def get_display_name(user):
         return "Unknown"
 
     first_name = (
-        getattr(
-            user,
-            "first_name",
-            None
-        )
+        getattr(user, "first_name", None)
         or ""
     )
 
     last_name = (
-        getattr(
-            user,
-            "last_name",
-            None
-        )
+        getattr(user, "last_name", None)
         or ""
     )
 
@@ -333,7 +375,7 @@ def get_participant_user_id(participant):
     except Exception as e:
 
         print(
-            "⚠️ Error extracting participant ID:",
+            "Error extracting participant ID:",
             e
         )
 
@@ -362,8 +404,7 @@ async def resolve_user(user_id):
     except Exception as e:
 
         print(
-            f"⚠️ Could not resolve user "
-            f"{user_id}: {e}"
+            f"Could not resolve user {user_id}: {e}"
         )
 
         return None
@@ -375,7 +416,7 @@ async def resolve_user(user_id):
 
 async def load_group_members():
 
-    print("👥 Loading group members...")
+    print("Loading group members...")
 
     count = 0
 
@@ -390,13 +431,13 @@ async def load_group_members():
             count += 1
 
         print(
-            f"✅ Loaded {count} group members"
+            f"Loaded {count} group members"
         )
 
     except Exception as e:
 
         print(
-            "⚠️ Could not load group members:",
+            "Could not load group members:",
             e
         )
 
@@ -410,17 +451,9 @@ async def get_current_call():
     try:
 
         if (
-            getattr(
-                chat_entity,
-                "broadcast",
-                False
-            )
+            getattr(chat_entity, "broadcast", False)
             or
-            getattr(
-                chat_entity,
-                "megagroup",
-                False
-            )
+            getattr(chat_entity, "megagroup", False)
         ):
 
             full = await client(
@@ -444,7 +477,7 @@ async def get_current_call():
     except Exception as e:
 
         print(
-            "⚠️ Error getting current VC:",
+            "Error getting current VC:",
             e
         )
 
@@ -474,7 +507,7 @@ async def get_current_participants(call):
     except Exception as e:
 
         print(
-            "⚠️ Error getting VC participants:",
+            "Error getting VC participants:",
             e
         )
 
@@ -485,36 +518,24 @@ async def get_current_participants(call):
 # REGISTER JOIN
 # ============================================================
 
-async def register_join(
-    user_id,
-    joined_time=None
-):
+async def register_join(user_id, joined_time=None):
 
     if not user_id:
         return
 
-    # Already inside
     if user_id in active_users:
         return
 
-    user = await resolve_user(
-        user_id
-    )
+    user = await resolve_user(user_id)
 
-    name = get_display_name(
-        user
-    )
+    name = get_display_name(user)
 
-    username = get_username(
-        user
-    )
+    username = get_username(user)
 
-    joined_time = (
-        joined_time
-        or now()
-    )
+    joined_time = joined_time or now()
 
     # Save active user
+
     active_users[user_id] = {
         "name": name,
         "username": username,
@@ -549,10 +570,10 @@ async def register_join(
     send_vc_event_log(message)
 
     print(
-        f"🟢 JOIN | "
-        f"{name} | "
+        f"JOIN | {name} | "
         f"{username or 'No username'} | "
-        f"{user_id}"
+        f"{user_id} | "
+        f"{format_time(joined_time)}"
     )
 
 
@@ -560,36 +581,28 @@ async def register_join(
 # REGISTER LEAVE
 # ============================================================
 
-async def register_leave(
-    user_id,
-    left_time=None
-):
+async def register_leave(user_id, left_time=None):
 
     if not user_id:
         return
 
-    # User is not being tracked
     if user_id not in active_users:
 
         print(
-            f"⚠️ Leave detected for "
-            f"untracked user: {user_id}"
+            f"Leave detected for untracked user: {user_id}"
         )
 
         return
 
-    user_data = active_users.pop(
-        user_id
-    )
+    user_data = active_users.pop(user_id)
 
     name = user_data["name"]
+
     username = user_data["username"]
+
     joined_time = user_data["joined"]
 
-    left_time = (
-        left_time
-        or now()
-    )
+    left_time = left_time or now()
 
     duration = format_duration(
         joined_time,
@@ -630,8 +643,7 @@ async def register_leave(
     send_vc_event_log(message)
 
     print(
-        f"🔴 LEFT | "
-        f"{name} | "
+        f"LEFT | {name} | "
         f"{username or 'No username'} | "
         f"{user_id} | "
         f"Duration: {duration}"
@@ -657,13 +669,8 @@ async def handle_vc_started(call):
     start_time = now()
 
     print(
-        f"🟢 VC STARTED | "
-        f"Call ID: {call.id}"
+        f"VC STARTED | Call ID: {call.id}"
     )
-
-    # --------------------------------------------------------
-    # VC START MESSAGE
-    # --------------------------------------------------------
 
     message = (
         "🟢 <b>VOICE CHAT STARTED</b>\n\n"
@@ -680,22 +687,17 @@ async def handle_vc_started(call):
 
     send_log(message)
 
-    # --------------------------------------------------------
-    # GET CURRENT PARTICIPANTS
-    # --------------------------------------------------------
+    # Get current participants
 
     participants = await get_current_participants(
         call
     )
 
     print(
-        f"👥 Current VC participants: "
-        f"{len(participants)}"
+        f"Current VC participants: {len(participants)}"
     )
 
-    # --------------------------------------------------------
-    # REGISTER CURRENT PARTICIPANTS
-    # --------------------------------------------------------
+    # Register current participants
 
     for participant in participants:
 
@@ -704,12 +706,6 @@ async def handle_vc_started(call):
         )
 
         if not user_id:
-
-            print(
-                "⚠️ Could not get user ID "
-                "from participant"
-            )
-
             continue
 
         await register_join(
@@ -731,11 +727,9 @@ async def handle_vc_ended():
 
     end_time = now()
 
-    print("🔴 VC ENDED")
+    print("VC ENDED")
 
-    # --------------------------------------------------------
-    # CLOSE EVERYONE STILL INSIDE
-    # --------------------------------------------------------
+    # Close everyone still inside
 
     remaining_users = list(
         active_users.keys()
@@ -747,10 +741,6 @@ async def handle_vc_ended():
             user_id,
             end_time
         )
-
-    # --------------------------------------------------------
-    # VC END MESSAGE
-    # --------------------------------------------------------
 
     message = (
         "🔴 <b>VOICE CHAT ENDED</b>\n\n"
@@ -799,7 +789,7 @@ async def vc_participant_update(update):
         return
 
     print(
-        f"📡 Telegram VC update received: "
+        f"Telegram VC update received: "
         f"{len(update.participants)} participant(s)"
     )
 
@@ -825,12 +815,13 @@ async def vc_participant_update(update):
         )
 
         print(
-            f"👤 User {user_id} | "
+            f"User {user_id} | "
             f"joined={just_joined} | "
             f"left={just_left}"
         )
 
         # JOIN
+
         if just_joined and not just_left:
 
             await register_join(
@@ -839,6 +830,7 @@ async def vc_participant_update(update):
             )
 
         # LEAVE
+
         elif just_left:
 
             await register_leave(
@@ -855,21 +847,17 @@ async def vc_monitor():
 
     global current_call_id
 
-    print("🔎 VC monitor started")
+    print("VC monitor started")
 
     while True:
 
         try:
 
-            # ------------------------------------------------
-            # GET CURRENT VC
-            # ------------------------------------------------
+            # Get current VC
 
             call = await get_current_call()
 
-            # ------------------------------------------------
-            # NO VC
-            # ------------------------------------------------
+            # No VC
 
             if not call:
 
@@ -881,49 +869,35 @@ async def vc_monitor():
 
                 continue
 
-            # ------------------------------------------------
-            # NEW VC
-            # ------------------------------------------------
+            # New VC
 
             if current_call_id is None:
 
                 print(
-                    f"🟢 New VC detected | "
-                    f"Call ID: {call.id}"
+                    f"New VC detected | Call ID: {call.id}"
                 )
 
-                await handle_vc_started(
-                    call
-                )
+                await handle_vc_started(call)
 
                 await asyncio.sleep(5)
 
                 continue
 
-            # ------------------------------------------------
-            # DIFFERENT VC
-            # ------------------------------------------------
+            # Different VC
 
             if current_call_id != call.id:
 
-                print(
-                    "🔄 Different VC detected"
-                )
+                print("Different VC detected")
 
                 await handle_vc_ended()
 
-                await handle_vc_started(
-                    call
-                )
+                await handle_vc_started(call)
 
                 await asyncio.sleep(5)
 
                 continue
 
-            # ------------------------------------------------
-            # SAME VC
-            # CHECK ACTUAL PARTICIPANTS
-            # ------------------------------------------------
+            # Same VC - check participants
 
             participants = await get_current_participants(
                 call
@@ -943,17 +917,14 @@ async def vc_monitor():
                         user_id
                     )
 
-            # ------------------------------------------------
-            # DETECT NEW USERS
-            # ------------------------------------------------
+            # Detect new users
 
             for user_id in current_user_ids:
 
                 if user_id not in active_users:
 
                     print(
-                        f"🟢 PARTICIPANT JOINED | "
-                        f"User ID: {user_id}"
+                        f"PARTICIPANT JOINED | User ID: {user_id}"
                     )
 
                     await register_join(
@@ -961,9 +932,7 @@ async def vc_monitor():
                         now()
                     )
 
-            # ------------------------------------------------
-            # DETECT USERS WHO LEFT
-            # ------------------------------------------------
+            # Detect users who left
 
             tracked_users = list(
                 active_users.keys()
@@ -974,8 +943,7 @@ async def vc_monitor():
                 if user_id not in current_user_ids:
 
                     print(
-                        f"🔴 PARTICIPANT LEFT | "
-                        f"User ID: {user_id}"
+                        f"PARTICIPANT LEFT | User ID: {user_id}"
                     )
 
                     await register_leave(
@@ -983,24 +951,20 @@ async def vc_monitor():
                         now()
                     )
 
-            # ------------------------------------------------
-            # DEBUG
-            # ------------------------------------------------
+            # Debug
 
             print(
-                f"👥 VC participants: "
-                f"{len(current_user_ids)} | "
-                f"Tracked: "
-                f"{len(active_users)}"
+                f"VC participants: {len(current_user_ids)} | "
+                f"Tracked: {len(active_users)} | "
+                f"Time: {format_time(now())}"
             )
 
         except Exception as e:
 
             print(
-                f"⚠️ VC monitor error: {e}"
+                f"VC monitor error: {e}"
             )
 
-        # Check every 5 seconds
         await asyncio.sleep(5)
 
 
@@ -1014,38 +978,34 @@ async def main():
     global chat_title
 
     print("=" * 60)
-    print("🚀 STARTING TELEGRAM VC LOGGER")
+    print("STARTING TELEGRAM VC LOGGER")
     print("=" * 60)
 
-    # --------------------------------------------------------
-    # CONNECT TELEGRAM
-    # --------------------------------------------------------
+    # Connect Telegram
 
-    print(
-        "🔐 Connecting Telegram account..."
-    )
+    print("Connecting Telegram account...")
 
     await client.start()
 
     me = await client.get_me()
 
-    me_name = get_display_name(
-        me
-    )
+    me_name = get_display_name(me)
 
     print(
-        f"✅ Telegram account connected: "
-        f"{me_name} "
-        f"(ID: {me.id})"
+        f"Telegram account connected: "
+        f"{me_name} (ID: {me.id})"
     )
 
-    # --------------------------------------------------------
-    # GET GROUP
-    # --------------------------------------------------------
+    # Show IST
 
     print(
-        f"🎯 Loading monitored group: "
-        f"{MONITORED_CHAT_ID}"
+        f"Current Indian Time: {format_time(now())}"
+    )
+
+    # Get group
+
+    print(
+        f"Loading monitored group: {MONITORED_CHAT_ID}"
     )
 
     chat_entity = await client.get_entity(
@@ -1053,32 +1013,21 @@ async def main():
     )
 
     chat_title = (
-        getattr(
-            chat_entity,
-            "title",
-            None
-        )
+        getattr(chat_entity, "title", None)
         or "YOU AND ME"
     )
 
     print(
-        f"✅ Monitoring group: "
-        f"{chat_title}"
+        f"Monitoring group: {chat_title}"
     )
 
-    # --------------------------------------------------------
-    # LOAD GROUP MEMBERS
-    # --------------------------------------------------------
+    # Load group members
 
     await load_group_members()
 
-    # --------------------------------------------------------
-    # TEST BOT
-    # --------------------------------------------------------
+    # Test bot
 
-    print(
-        "🤖 Testing log bot..."
-    )
+    print("Testing log bot...")
 
     test_message = (
         "🟢 <b>VC LOGGER ONLINE</b>\n\n"
@@ -1089,28 +1038,30 @@ async def main():
         f"🆔 <b>Group ID:</b> "
         f"<code>{MONITORED_CHAT_ID}</code>\n"
 
+        f"👑 <b>Owner ID:</b> "
+        f"<code>{OWNER_ID}</code>\n"
+
         f"🕐 <b>Started:</b> "
         f"{format_time(now())}\n\n"
 
-        "📡 <b>Real-time VC monitoring "
-        "is active.</b>"
+        "📡 <b>Real-time VC monitoring is active.</b>"
     )
 
     send_log(test_message)
 
-    # --------------------------------------------------------
-    # START MONITOR
-    # --------------------------------------------------------
+    # Start monitor
 
     asyncio.create_task(
         vc_monitor()
     )
 
     print("=" * 60)
-    print("🟢 VC LOGGER IS RUNNING 24/7")
+    print("VC LOGGER IS RUNNING 24/7")
+    print("TIMEZONE: Asia/Kolkata (IST)")
+    print(f"OWNER ID: {OWNER_ID}")
+    print("OWNER PROFILE BUTTON: ENABLED")
     print("=" * 60)
 
-    # Keep connection alive
     await client.run_until_disconnected()
 
 
@@ -1126,12 +1077,11 @@ if __name__ == "__main__":
 
     except KeyboardInterrupt:
 
-        print(
-            "\n🛑 VC Logger stopped."
-        )
+        print("\nVC Logger stopped.")
 
     except Exception as e:
 
         print(
-            f"\n❌ Fatal error: {e}"
+            f"\nFatal error: {e}"
         )
+```
